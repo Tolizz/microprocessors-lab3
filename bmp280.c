@@ -35,7 +35,7 @@ void bmp280_read_registers(uint8_t reg_addr, uint8_t *data, int len){
 // ==========================================
 
 // Change Power Mode (bits 1 and 0 of register 0xF4)
-void bmp_set_mode(uint8_t mode){
+void bmp280_set_mode(uint8_t mode){
 	uint8_t ctrl_meas;
 	bmp280_read_registers(BMP280_REG_CTRL_MEAS, &ctrl_meas, 1);
 	ctrl_meas = (ctrl_meas & ~0x03) | (mode & 0x03);
@@ -44,7 +44,7 @@ void bmp_set_mode(uint8_t mode){
 
 
 // Change IIR filter (bits 4,3 and 2 of register 0xF5)
-void bmp_set_filter(uint8_t filter){
+void bmp280_set_filter(uint8_t filter){
 	uint8_t config;
 	bmp280_read_registers(BMP280_REG_CONFIG, &config, 1);
 	config = (config & ~0x1C) | ((filter << 2) & 0x1C);
