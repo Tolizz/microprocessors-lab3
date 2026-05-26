@@ -10,8 +10,8 @@
 #include <math.h>
 
 // Define pins for external hardware
-#define EXT_BTN	PA_1
-#define EXT_LED	PA_2
+#define EXT_BTN	PA_1		// external button
+#define EXT_LED	PA_2		// external led
 
 // define modes
 #define ACTIVE_MODE	0
@@ -20,7 +20,7 @@
 // Global variables
 Queue rx_queue;
 uint32_t system_ticks = 0;
-float initial_pressure_P0 = 1013.25f;
+uint32_t initial_pressure_P0 = 101325;
 
 
 // System States
@@ -28,14 +28,14 @@ float initial_pressure_P0 = 1013.25f;
 #define ECO_MODE 		1
 uint8_t current_mode = ACTIVE_MODE;
 
-// Flags
+// ISR Flags
 bool toggle_mode_flag = false;
-bool iir_filter_on = false;
-bool alarm_active = false;
-bool take_measurement = false;
-bool toggle_led_flag = false;
 bool update_p0_flag = false;
 bool timer_tick = false;
+
+// Flags
+bool iir_filter_on = false;
+bool alarm_active = false;
 
 // Cyclic table of 10 values
 uint32_t pressure_history[10] = {0};
@@ -66,26 +66,39 @@ int main(){
 	uint8_t rx_char;
 	int32_t temp;
 	uint32_t press;
-	int32_t relative_height;
+	float relative_altitude = 0.0;
 	uint32_t last_led_tick = 0, last_sensor_tick = 0;
 	bool led_state = false;
-	bool steep_fall = false;
-	bool full_mem = false;
 	
-	//initializations
+	// initializations
 	queue_init(&rx_queue, 128);
 	
+	// uart
 	uart_init(115200);
 	uart_set_rx_callback(uart_rx_isr);
 	uart_enable();
 	
+	// User (onboard) led
 	leds_init();
+	
+	// bmp280
 	bmp280_init();
 	
+	// User(onboard) button
 	gpio_set_mode(P_SW, Input);
 	gpio_set_trigger(P_SW, Falling);
 	gpio_set_callback(P_SW, my_gpio_isr_callback);
 	
+	// External button
+	gpio_set_mode(EXT_BTN, Input);
+	gpio_set_trigger(EXT_BTN, Falling);
+	gpio_set_callback(EXT_BTN, my_gpio_isr_callback);
+	
+	// External Led
+	gpio_set_mode(EXT_LED, Output);
+	gpio_set(EXT_LED, 0);
+	
+	// Timer
 	timer_init(250000); // 250ms
 	timer_set_callback(systick_isr_callback);
 	timer_enable();
@@ -113,8 +126,23 @@ int main(){
 				alarm_active = false;
 				uart_print("Alarm Cleared\r\n");
 			} else if (rx_char == 's'){
-				sprintf(print_buff, "Mode: %s, Filter: %s, P0: %f\r\n", current_mode ? "ECO" : "ACTIVE", iir_filter_on ? "ON" : "OFF", initial_pressure_P0);
+				// general status
+				sprintf(print_buff, "Mode: %s, Filter: %s, P0: %d.%02d hPa\r\n", 
+				current_mode ? "ECO" : "ACTIVE", iir_filter_on ? "ON" : "OFF", initial_pressure_P0/100, initial_pressure_P0%100);
 				uart_print(print_buff);
+				
+				// print memory
+				uart_print("--- Last 10 measurements (Newest to Oldest) ---\r\n");
+				for(int i = 1; i <= 10; i++){
+					// calculate inverse idx
+					int idx = (history_idx - i + 10) % 10;
+					
+					if(pressure_history[idx] != 0){
+						sprintf(print_buff, " > %d.%02d hPa\r\n", pressure_history[idx] / 100, pressure_history[idx]%100);
+						uart_print(print_buff);
+					}
+				}
+				uart_print("-----------------------------------------------\r\n");
 			}
 		}
 		
@@ -125,35 +153,64 @@ int main(){
 			uart_print(current_mode == ACTIVE_MODE ? "Mode: ACTIVE\r\n" : "Mode: ECO\r\n");
 		}
 		
+		// external led (alarm)
+		if(alarm_active){
+			gpio_set(EXT_LED, 1);
+		} else {
+			gpio_set(EXT_LED, 0);
+		}
+		
 		// user(onboard) button (update P0)
 		if(update_p0_flag){
 			update_p0_flag = false;
 			bmp280_trigger_forced_measurement();
+			// maybe delay needed here
 			bmp280_read_measurements(&temp, &press);
 			initial_pressure_P0 = press;
+			sprintf(print_buff,"New ground pressure set! P0: %d.%02d hPa\r\n", initial_pressure_P0/100, initial_pressure_P0%100);
+			uart_print(print_buff);
 		}
 		
-		// LED handling
+		// Onboard LED handling (Blink depending on Mode)
 		if ((current_ticks - last_led_tick) >= led_int){
 			last_led_tick = current_ticks;
-			if(alarm_active) leds_set(1,0,0);
-			else {
-				led_state = !led_state;
-				leds_set(led_state, 0, 0);
-			}
+			led_state = !led_state;
+			leds_set(led_state, 0, 0);
 		}
-		// Full memory check
-		if(!full_mem && history_idx == 9) full_mem = true;
 			
 		// Sensor handling
 		if ((current_ticks - last_sensor_tick) >= sen_int){
 			last_sensor_tick = current_ticks;
 			bmp280_trigger_forced_measurement();
+			// maybe delay needed here
 			bmp280_read_measurements(&temp, &press);
-			relative_height = 44330 * (1-pow((press/initial_pressure_P0), (1/5.255)));
+			relative_altitude = 44330 * (1.0 - pow(((float)press/(float)initial_pressure_P0), (1.0/5.255)));
 			
 			// Alarm logic
-			if((temp > 3500) || ((initial_pressure_P0 - press) > 1000)|| (steep_fall)) alarm_active = true;
+			bool condition1 = (temp > 3500);
+			bool condition2 = (initial_pressure_P0 > press) && ((initial_pressure_P0 - press) > 1000);
+			bool condition3 = false;
+			if(current_mode == ACTIVE_MODE){
+				uint32_t past_press = pressure_history[history_idx];
+				if(past_press != 0 && past_press > press && (past_press - press) > 500) condition3 = true;
+			} else{
+				int past_idx = (history_idx + 8) % 10;
+				uint32_t past_press = pressure_history[past_idx];
+				if(past_press != 0 && past_press > press && (past_press - press) > 500) condition3 = true;
+			}
+			if(condition1 || condition2 || condition3) alarm_active = true;
+			
+			if(alarm_active){		// print alarm message
+				uart_print("[ALERT] Extreme Conditions Detected!\r\n");
+			} else {						// print measurements
+				char sign = (relative_altitude < 0) ? '-' : ' ';
+				int alt_int = (int)fabs(relative_altitude);
+				int alt_frac = (int)(fabs(relative_altitude - alt_int) * 100);
+				
+				sprintf(print_buff, "Temp: %d.%02d C | Press: %d hPa | Alt: %c%d.%02d m\r\n", temp/100, temp % 100, press / 100, sign, alt_int, alt_frac);
+				uart_print(print_buff);
+			}
+				
 			
 			pressure_history[history_idx] = press;
 			history_idx = (history_idx + 1) % 10;		// mod 10 so it turn numbers >= 10 to 1-9
