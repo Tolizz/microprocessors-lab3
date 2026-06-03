@@ -10,8 +10,8 @@
 #include <math.h>
 
 // Define pins for external hardware
-#define EXT_BTN	PA_1		// external button
-#define EXT_LED	PA_2		// external led
+#define EXT_BTN	PB_1		// external button
+#define EXT_LED	PC_2		// external led
 
 // define modes
 #define ACTIVE_MODE	0
@@ -36,6 +36,7 @@ bool timer_tick = false;
 // Flags
 bool iir_filter_on = false;
 bool alarm_active = false;
+bool alarm_acknowledged = false;
 
 // Cyclic table of 10 values
 uint32_t pressure_history[10] = {0};
@@ -52,11 +53,12 @@ void systick_isr_callback(void){
 	timer_tick = true;
 }
 
-// gpio buttons
+// user(onboard) button
 void my_gpio_isr_callback(int pin_index){
-	if(pin_index == GET_PIN_INDEX(P_SW)){ // user button
+	if (pin_index == 13){
 		update_p0_flag = true;
-	} else if (pin_index == GET_PIN_INDEX(EXT_BTN)){ // external button
+	} 
+	else if (pin_index == 1){
 		toggle_mode_flag = true;
 	}
 }
@@ -77,21 +79,23 @@ int main(){
 	uart_init(115200);
 	uart_set_rx_callback(uart_rx_isr);
 	uart_enable();
+	printf("Uart init!\r\n");
 	
 	// User (onboard) led
 	leds_init();
 	
 	// bmp280
 	bmp280_init();
+	printf("BMP280 init!\r\n");
 	
 	// User(onboard) button
 	gpio_set_mode(P_SW, Input);
-	gpio_set_trigger(P_SW, Falling);
+	gpio_set_trigger(P_SW, Rising);
 	gpio_set_callback(P_SW, my_gpio_isr_callback);
 	
 	// External button
 	gpio_set_mode(EXT_BTN, Input);
-	gpio_set_trigger(EXT_BTN, Falling);
+	gpio_set_trigger(EXT_BTN, Rising);
 	gpio_set_callback(EXT_BTN, my_gpio_isr_callback);
 	
 	// External Led
@@ -105,12 +109,10 @@ int main(){
 	
 	__enable_irq();
 	
+	printf("Initialization complete!\r\n");
+	uart_print("Initialization complete!\r\n");
+	
 	while(1){		
-		// timer handling
-		if(timer_tick){
-			timer_tick = false;
-			system_ticks++;
-		}
 		
 		uint32_t current_ticks = system_ticks;
 		uint32_t led_int = (current_mode == ACTIVE_MODE) ? 1 : 8; 	// 250ms vs 2sec
@@ -124,6 +126,7 @@ int main(){
 				uart_print(iir_filter_on ? "Filter: ON\r\n" : "Filter: OFF\r\n");
 			} else if (rx_char == 'c'){
 				alarm_active = false;
+				alarm_acknowledged = true;
 				uart_print("Alarm Cleared\r\n");
 			} else if (rx_char == 's'){
 				// general status
@@ -143,7 +146,19 @@ int main(){
 					}
 				}
 				uart_print("-----------------------------------------------\r\n");
-			}
+			} else if(rx_char == 't'){ //force toggle mode
+				toggle_mode_flag = true;
+				printf("Fake external button triggered\r\n");
+			}	else if(rx_char == 'a'){ //force alarm through initial pressure change
+				initial_pressure_P0 += 2000;
+				printf("Artificial pressure change triggered\r\n");
+			}				
+		}
+		
+		// timer handling
+		if(timer_tick){
+			timer_tick = false;
+			system_ticks++;
 		}
 		
 		// external button (toggle mode)
@@ -163,6 +178,8 @@ int main(){
 		// user(onboard) button (update P0)
 		if(update_p0_flag){
 			update_p0_flag = false;
+			uart_print("Onboard button pushed\r\n");
+			printf("Onboard button pushed\r\n");
 			bmp280_trigger_forced_measurement();
 			// maybe delay needed here
 			bmp280_read_measurements(&temp, &press);
@@ -182,7 +199,7 @@ int main(){
 		if ((current_ticks - last_sensor_tick) >= sen_int){
 			last_sensor_tick = current_ticks;
 			bmp280_trigger_forced_measurement();
-			// maybe delay needed here
+			// maybe delay here
 			bmp280_read_measurements(&temp, &press);
 			relative_altitude = 44330 * (1.0 - pow(((float)press/(float)initial_pressure_P0), (1.0/5.255)));
 			
@@ -198,19 +215,26 @@ int main(){
 				uint32_t past_press = pressure_history[past_idx];
 				if(past_press != 0 && past_press > press && (past_press - press) > 500) condition3 = true;
 			}
-			if(condition1 || condition2 || condition3) alarm_active = true;
+			bool alarm_conditions_met = (condition1 || condition2 || condition3);
+			
+			if(alarm_conditions_met){
+				if (!alarm_acknowledged){
+					alarm_active = true;
+				}
+			} else {
+				alarm_active = false;
+				alarm_acknowledged = false;
+			}
 			
 			if(alarm_active){		// print alarm message
 				uart_print("[ALERT] Extreme Conditions Detected!\r\n");
-			} else {						// print measurements
-				char sign = (relative_altitude < 0) ? '-' : ' ';
-				int alt_int = (int)fabs(relative_altitude);
-				int alt_frac = (int)(fabs(relative_altitude - alt_int) * 100);
+			}						// print measurements
+			char sign = (relative_altitude < 0) ? '-' : ' ';
+			int alt_int = (int)fabs(relative_altitude);
+			int alt_frac = (int)(fabs(relative_altitude - alt_int) * 100);
 				
-				sprintf(print_buff, "Temp: %d.%02d C | Press: %d hPa | Alt: %c%d.%02d m\r\n", temp/100, temp % 100, press / 100, sign, alt_int, alt_frac);
-				uart_print(print_buff);
-			}
-				
+			sprintf(print_buff, "Temp: %d.%02d C | Press: %d.%02d hPa | Alt: %c%d.%02d m\r\n", temp/100, temp % 100, press / 100, press % 100, sign, alt_int, alt_frac);
+			uart_print(print_buff);			
 			
 			pressure_history[history_idx] = press;
 			history_idx = (history_idx + 1) % 10;		// mod 10 so it turn numbers >= 10 to 1-9

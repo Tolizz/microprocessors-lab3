@@ -1,5 +1,6 @@
 #include "bmp280.h"
 #include "i2c.h"
+#include <stdio.h>
 
 // Global variables
 bmp280_calib_data calib_data;
@@ -87,6 +88,7 @@ void bmp280_init(void){
 	
 	bmp280_read_registers(BMP280_REG_CHIPID, &chip_id, 1);
 	if(chip_id != 0x58){
+		printf("Wrong chip id!\r\n");
 		return; // Fail - Wrong CHIP ID
 	}
 	
@@ -95,7 +97,7 @@ void bmp280_init(void){
 	
 	// Basic initialization settings
 	// Oversampling Temp x2, Press x16, Normal Mode
-	uint8_t ctrl_meas_val = (BMP280_OSRS_2X << 5) | (BMP280_OSRS_16X << 2) | BMP280_MODE_NORMAL;
+	uint8_t ctrl_meas_val = (BMP280_OSRS_2X << 5) | (BMP280_OSRS_16X << 2) | BMP280_MODE_SLEEP;
 	bmp280_write_register(BMP280_REG_CTRL_MEAS, ctrl_meas_val);
 	
 	// Standby 1000ms (5 << 5), IIR Filter OFF (00)
